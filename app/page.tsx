@@ -53,6 +53,168 @@ function sumCounts(rec: Record<string, number>): number {
   return Object.values(rec).reduce((a, b) => a + (b || 0), 0);
 }
 
+/** ===== タイルユーティリティ ===== */
+function tileIsHonor(t: Tile){ return t.startsWith('z'); }
+function tileSuit(t: Tile): 'm'|'p'|'s'|'z' { return t.startsWith('z') ? 'z' : (t[1] as 'm'|'p'|'s'); }
+function tileNum(t: Tile): number { return t.startsWith('z') ? parseInt(t.slice(1),10) : parseInt(t[0],10); }
+function tileIsTerminalOrHonor(t: Tile){ return tileIsHonor(t) || tileNum(t)===1 || tileNum(t)===9; }
+
+/** ===== 面子分解（4面子1雀頭） ===== */
+type Meld = { kind: 'pon'|'chi', tiles: Tile[] };
+
+function cloneCountsObj(c: Record<string, number>) {
+  return Object.fromEntries(Object.entries(c).map(([k,v])=>[k, v||0]));
+}
+
+/** counts（牌→枚数）から 4面子1雀頭 の分解を1つ見つける（なければ null） */
+function findMeldDecomposition(counts0: Record<string, number>): { pair: Tile, melds: Meld[] } | null {
+  const tiles = ALL_TILES;
+  // 候補の雀頭を順に試す
+  for (const p of tiles) {
+    if ((counts0[p] ?? 0) < 2) continue;
+    const c1 = cloneCountsObj(counts0);
+    c1[p] -= 2;
+
+    const melds: Meld[] = [];
+    if (searchMelds(c1, melds)) return { pair: p, melds };
+  }
+  return null;
+
+  function searchMelds(c: Record<string, number>, acc: Meld[]): boolean {
+    // 残りがゼロなら成立
+    let has = false;
+    for (const t of tiles) { if ((c[t]??0)>0) { has=true; break; } }
+    if (!has) return true;
+
+    // 最初に残っている牌を探す
+    let first: Tile | null = null;
+    for (const t of tiles) { if ((c[t]??0)>0) { first = t as Tile; break; } }
+    if (!first) return true;
+
+    const s = tileSuit(first), n = tileNum(first);
+
+    // 1) 刻子（pon）
+    if ((c[first]??0) >= 3) {
+      c[first]-=3;
+      acc.push({ kind:'pon', tiles:[first, first, first] });
+      if (searchMelds(c, acc)) return true;
+      acc.pop();
+      c[first]+=3;
+    }
+
+    // 2) 順子（chi）… 数牌のみ、n<=7
+    if (s !== 'z' && n <= 7) {
+      const a = `${n}${s}` as Tile, b = `${n+1}${s}` as Tile, d = `${n+2}${s}` as Tile;
+      if ((c[a]??0)>0 && (c[b]??0)>0 && (c[d]??0)>0) {
+        c[a]--; c[b]--; c[d]--;
+        acc.push({ kind:'chi', tiles:[a,b,d] });
+        if (searchMelds(c, acc)) return true;
+        acc.pop();
+        c[a]++; c[b]++; c[d]++;
+      }
+    }
+    return false;
+  }
+}
+
+/** 七対子（2枚×7種） */
+function isChiitoitsu(counts: Record<string, number>): boolean {
+  let pairs = 0;
+  for (const t of ALL_TILES) {
+    const v = counts[t] ?? 0;
+    if (v === 2) pairs++;
+    else if (v !== 0) return false;
+  }
+  return pairs === 7;
+}
+
+/** 三色同順（menzen前提） */
+function hasSanshokuDoujun(melds: Meld[]): boolean {
+  for (let n=1;n<=7;n++){
+    const need = [`${n}m`,`${n}p`,`${n}s`] as Tile[];
+    const has = (suit:'m'|'p'|'s') =>
+      melds.some(m => m.kind==='chi' && m.tiles[0]===`${n}${suit}` && m.tiles[1]===`${n+1}${suit}` && m.tiles[2]===`${n+2}${suit}`);
+    if (has('m') && has('p') && has('s')) return true;
+  }
+  return false;
+}
+
+/** 一気通貫（menzen前提） */
+function hasIttsuu(melds: Meld[]): boolean {
+  const hasSeq = (suit:'m'|'p'|'s', start:number) =>
+    melds.some(m => m.kind==='chi' && m.tiles[0]===`${start}${suit}` && m.tiles[1]===`${start+1}${suit}` && m.tiles[2]===`${start+2}${suit}`);
+  for (const s of ['m','p','s'] as const){
+    if (hasSeq(s,1) && hasSeq(s,4) && hasSeq(s,7)) return true;
+  }
+  return false;
+}
+
+/** 対子が役牌か（符計算用） */
+function isValuePair(pair: Tile, seatWind: Wind, roundWind: Wind): boolean {
+  if (pair==='z5' || pair==='z6' || pair==='z7') return true; // 白發中
+  if (pair === windToTile[seatWind]) return true;
+  if (pair === windToTile[roundWind]) return true;
+  return false;
+}
+
+/** メンツが全部刻子なら対々和 */
+function isToitoi(melds: Meld[]): boolean {
+  return melds.length===4 && melds.every(m => m.kind==='pon');
+}
+
+/** 清一色/混一色 判定 */
+function suitSummary(counts: Record<string, number>) {
+  let hasM=false, hasP=false, hasS=false, hasZ=false;
+  for (const t of ALL_TILES) {
+    const v = counts[t] ?? 0;
+    if (!v) continue;
+    const s = tileSuit(t);
+    if (s==='m') hasM=true; else if (s==='p') hasP=true; else if (s==='s') hasS=true; else hasZ=true;
+  }
+  return { hasM,hasP,hasS,hasZ };
+}
+
+/** ===== 符計算（MVP拡張版：待ち形は未反映） ===== */
+function computeFuDetailed(args: {
+  hand: Tile[]; win: WinMethod; pair: Tile|null; melds: Meld[]|null;
+  pinfu: boolean; seatWind: Wind; roundWind: Wind;
+}): number {
+  const { hand, win, pair, melds, pinfu, seatWind, roundWind } = args;
+  const counts = countsFromHand(hand);
+
+  // 七対子：25符固定
+  if (isChiitoitsu(counts)) return 25;
+
+  // 平和：ツモ20符／ロン30符（MVP）
+  if (pinfu) return win === 'tsumo' ? 20 : 30;
+
+  // それ以外：符の素点を積み上げ→10の位切り上げ
+  let fu = 20;
+
+  // ツモ +2
+  if (win === 'tsumo') fu += 2;
+  // 門前ロン +10（本アプリは副露入力がない＝門前前提）
+  if (win === 'ron') fu += 10;
+
+  // 雀頭（役牌なら +2）
+  if (pair && isValuePair(pair, seatWind, roundWind)) fu += 2;
+
+  // 面子：刻子のみ加符（順子は0）
+  if (melds) {
+    for (const m of melds) {
+      if (m.kind==='pon') {
+        const t = m.tiles[0];
+        const isTh = tileIsTerminalOrHonor(t);
+        // 門前前提の刻子：中張 4符 / 老頭・字 8符
+        fu += isTh ? 8 : 4;
+      }
+    }
+  }
+
+  // 10の位切り上げ
+  return Math.ceil(fu / 10) * 10;
+}
+
 /** ===== 画像タイル（通常 or 赤5でパス切替）===== */
 const TileImg: React.FC<{ tile: Tile; size?: number; red?: boolean }> = ({ tile, size=64, red=false }) => {
   const w = size, h = size*1.3;
@@ -197,24 +359,62 @@ function computeFu({ isPinfuHan, win }: { isPinfuHan: boolean; win: WinMethod; }
   if (isPinfuHan) return win === "tsumo" ? 20 : 30; // 簡易
   return 30;
 }
-function computePoints({ han, fu, dealer, win }: { han: number; fu: number; dealer: boolean; win: WinMethod; }) {
-  let base = calcBasePoints(fu, han);
-  const mangan = han >= 5 || base >= 2000;
-  if (mangan) base = 2000;
+
+type LimitInfo = { label: string | null; cappedBase: number };
+
+function getLimitInfo(han: number, baseBeforeCap: number): LimitInfo {
+  // 役満（MVP：13翻以上を役満扱い）
+  if (han >= 13) return { label: "役満",   cappedBase: 8000 };
+  // 三倍満
+  if (han >= 11) return { label: "三倍満", cappedBase: 6000 };
+  // 倍満
+  if (han >= 8)  return { label: "倍満",   cappedBase: 4000 };
+  // 跳満
+  if (han >= 6)  return { label: "跳満",   cappedBase: 3000 };
+  // 満貫（5翻 or 基底点2000以上）
+  if (han >= 5 || baseBeforeCap >= 2000) return { label: "満貫", cappedBase: 2000 };
+  // それ未満は上限なし
+  return { label: null, cappedBase: baseBeforeCap };
+}
+
+function computePoints({
+  han, fu, dealer, win
+}: { han: number; fu: number; dealer: boolean; win: WinMethod; }) {
+
+  // 基底点（符 × 2^(2+翻)）
+  const baseRaw = calcBasePoints(fu, han);
+
+  // 上限判定（満貫〜役満）
+  const { label, cappedBase } = getLimitInfo(han, baseRaw);
+  const base = cappedBase;
+
   if (win === "ron") {
     const total = roundUpToHundred(base * (dealer ? 6 : 4));
-    return { total, breakdown: dealer ? "親ロン" : "子ロン", mangan };
+    return {
+      total,
+      breakdown: dealer ? "親ロン" : "子ロン",
+      limitLabel: label,
+    };
   } else {
     if (dealer) {
       const each = roundUpToHundred(base * 2);
-      return { total: each * 3, breakdown: `親ツモ：各${each}点×3`, mangan };
+      return {
+        total: each * 3,
+        breakdown: `親ツモ：各${each}点×3`,
+        limitLabel: label,
+      };
     } else {
       const child = roundUpToHundred(base);
       const dealerPay = roundUpToHundred(base * 2);
-      return { total: child*2 + dealerPay, breakdown: `子ツモ：子${child}点×2／親${dealerPay}点`, mangan };
+      return {
+        total: child * 2 + dealerPay,
+        breakdown: `子ツモ：子${child}点×2／親${dealerPay}点`,
+        limitLabel: label,
+      };
     }
   }
 }
+
 function formatYakuList(ys: string[]): string { return ys.length ? ys.join("、") : "（役なし）"; }
 
 /** ===== メイン ===== */
@@ -268,63 +468,86 @@ export default function MahjongScorerApp(){
 
   const sortedHand = useMemo(()=>sortTilesForView(hand), [hand]);
 
-  // スコア（簡易）
+  // スコア（拡張版）
   const yakuAndScore = useMemo(()=>{
   if (hand.length !== 14) return null;
 
-  // ★役牌判定に使うカウントを先に用意
   const counts = countsFromHand(hand);
+  const menzen = true; // 本MVPは副露入力がない＝門前扱い
 
-  // 既存の役（MVP簡易）
+  // --- 役の下ごしらえ ---
+  const pinfu = isPinfu(hand);                      // 近似：待ち形は未判定
   const tanyao = isTanyao(hand);
-  const pinfu = isPinfu(hand);
-  const iipeikou = pinfu && hasIipeikou(counts);
-  const menzenTsumo = win === "tsumo";
-  const redHan = (redCounts['5m']||0) + (redCounts['5p']||0) + (redCounts['5s']||0); // 赤ドラ=各1翻
+  const iipeikou = pinfu && hasIipeikou(counts);    // 近似：分解に依存しない近似でOK
+  const chiitoi = isChiitoitsu(counts);
 
-  let han = 0;
+  // 4面子1雀頭の分解（七対子でなければ必要）
+  const decomp = chiitoi ? null : findMeldDecomposition(counts);
+  const pair = chiitoi ? null : decomp?.pair ?? null;
+  const melds = chiitoi ? null : decomp?.melds ?? null;
+
+  // 三色/一気通貫/対々和など（分解が取れている時のみ）
+  const sanshoku = !!melds && hasSanshokuDoujun(melds);
+  const ittsuu   = !!melds && hasIttsuu(melds);
+  const toitoi   = !!melds && isToitoi(melds);
+
+  // 役牌（風/三元）
+  const seatWindTile = windToTile[seatWind];
+  const roundWindTile = windToTile[roundWind];
+
   const yaku: string[] = [];
+  let han = 0;
 
-  if (tanyao) { han += 1; yaku.push("タンヤオ（1翻）"); }
-  if (pinfu) { han += 1; yaku.push("平和（1翻）"); }
-  if (iipeikou) { han += 1; yaku.push("一盃口（1翻）"); }
-  if (menzenTsumo) { han += 1; yaku.push("門前清自摸和（1翻）"); }
-  if (riichi) { han += 1; yaku.push("立直（1翻）"); }
-  if (redHan > 0) { han += redHan; yaku.push(`赤ドラ×${redHan}（各1翻）`); }
+  // 基本役
+  if (tanyao)         { han += 1; yaku.push("タンヤオ（1翻）"); }
+  if (pinfu)          { han += 1; yaku.push("平和（1翻）"); }
+  if (iipeikou)       { han += 1; yaku.push("一盃口（1翻）"); }
+  if (riichi)         { han += 1; yaku.push("立直（1翻）"); }
+  if (win === "tsumo"){ han += 1; yaku.push("門前清自摸和（1翻）"); }
+  if (chiitoi)        { han += 2; yaku.push("七対子（2翻）"); }
 
-  // === ここから役牌（風/三元）を追加 ===
-  // 必要ヘルパー：
-  //  - windToTile: {E:'z1', S:'z2', W:'z3', N:'z4'}
-  //  - WIND_OPTIONS: [{label:'東',value:'E'}, ...]
-  //  - hasTripletOrQuad(counts, tile): 3枚以上ならtrue
-  // --- 風の役牌：ダブ風は1行で2翻、それ以外は個別に加算 ---
-  const seatLabel = WIND_OPTIONS.find(w => w.value === seatWind)?.label;
-  const roundLabel = WIND_OPTIONS.find(w => w.value === roundWind)?.label;
+  // 複合系
+  if (toitoi)         { han += 2; yaku.push("対々和（2翻）"); }
+  if (sanshoku)       { han += menzen ? 2 : 1; yaku.push(`三色同順（${menzen?2:1}翻）`); }
+  if (ittsuu)         { han += menzen ? 2 : 1; yaku.push(`一気通貫（${menzen?2:1}翻）`); }
 
-  const isSeatWindTriplet  = hasTripletOrQuad(counts, windToTile[seatWind]);
-  const isRoundWindTriplet = hasTripletOrQuad(counts, windToTile[roundWind]);
+  // 清一/混一（役満・混一色は副露で翻が変わるが門前前提）
+  const ss = suitSummary(counts);
+  const suitCount = (ss.hasM?1:0)+(ss.hasP?1:0)+(ss.hasS?1:0);
+  if (suitCount===1 && !ss.hasZ) { han += menzen ? 6 : 5; yaku.push(`清一色（${menzen?6:5}翻）`); }
+  else if (suitCount===1 && ss.hasZ) { han += menzen ? 3 : 2; yaku.push(`混一色（${menzen?3:2}翻）`); }
 
-  if (isSeatWindTriplet && isRoundWindTriplet && seatWind === roundWind) {
-    // ダブ風：自風=場風 かつ その風が刻子/槓子
-    han += 2;
-    yaku.push(`役牌：ダブ${seatLabel}（2翻）`);
+  // 役牌（風/三元）…刻子/槓子があるかで判定（既存ロジックを流用）
+  const isSeatTrip = (counts[seatWindTile] ?? 0) >= 3;
+  const isRoundTrip= (counts[roundWindTile] ?? 0) >= 3;
+  const seatLabel  = WIND_OPTIONS.find(w=>w.value===seatWind)?.label;
+  const roundLabel = WIND_OPTIONS.find(w=>w.value===roundWind)?.label;
+
+  if (isSeatTrip && isRoundTrip && seatWind === roundWind) {
+    han += 2; yaku.push(`役牌：ダブ${seatLabel}（2翻）`);
   } else {
-    if (isSeatWindTriplet)  { han += 1; yaku.push(`役牌：自風（${seatLabel}）`); }
-    if (isRoundWindTriplet) { han += 1; yaku.push(`役牌：場風（${roundLabel}）`); }
+    if (isSeatTrip)  { han += 1; yaku.push(`役牌：自風（${seatLabel}）`); }
+    if (isRoundTrip) { han += 1; yaku.push(`役牌：場風（${roundLabel}）`); }
   }
+  if ((counts['z5']??0) >= 3) { han += 1; yaku.push('役牌：白'); }
+  if ((counts['z6']??0) >= 3) { han += 1; yaku.push('役牌：發'); }
+  if ((counts['z7']??0) >= 3) { han += 1; yaku.push('役牌：中'); }
 
-  // 三元牌（白發中）
-  if (hasTripletOrQuad(counts, 'z5')) { han += 1; yaku.push('役牌：白'); }
-  if (hasTripletOrQuad(counts, 'z6')) { han += 1; yaku.push('役牌：發'); }
-  if (hasTripletOrQuad(counts, 'z7')) { han += 1; yaku.push('役牌：中'); }
-  // === 役牌ここまで ===
+  // 赤ドラ
+  const redHan = (redCounts['5m']||0) + (redCounts['5p']||0) + (redCounts['5s']||0);
+  if (redHan>0) { han += redHan; yaku.push(`赤ドラ×${redHan}（各1翻）`); }
 
-  const fu = computeFu({ isPinfuHan: pinfu, win });
+  // 符（拡張版）：七対子・平和特例、その他は刻子/役牌雀頭/門前ロン・ツモ加符
+  const fu = computeFuDetailed({
+    hand, win, pair, melds, pinfu,
+    seatWind, roundWind
+  });
+
+  // 点数（現状は従来ロジックにそのまま渡す）
   const pts = computePoints({ han, fu, dealer, win });
 
   return { han, fu, pts, yaku };
   }, [hand, win, dealer, riichi, redCounts, roundWind, seatWind]);
-
 
   return (
     <div className="mx-auto max-w-6xl p-4">
@@ -441,9 +664,16 @@ export default function MahjongScorerApp(){
               <div className="text-sm">
                 <div className="mb-1">役：{formatYakuList(yakuAndScore.yaku)}</div>
                 <div className="mb-1">翻：{yakuAndScore.han} 翻</div>
-                <div className="mb-1">符：{yakuAndScore.fu} 符（簡易計算）</div>
+                <div className="mb-1">符：{yakuAndScore.fu} 符</div>
                 <div className="mb-1">支払い：{yakuAndScore.pts.breakdown}</div>
-                <div className="font-semibold">合計点：{yakuAndScore.pts.total} 点{yakuAndScore.pts.mangan ? "（満貫以上は満貫に丸め）" : ""}</div>
+                <div className="font-semibold flex items-center">
+                  合計点：{yakuAndScore.pts.total} 点
+                  {yakuAndScore.pts.limitLabel && (
+                  <span className="ml-2 inline-block rounded-full border px-2 py-0.5 text-xs">
+                  {yakuAndScore.pts.limitLabel}
+                </span>
+                )}
+                </div>
               </div>
             )}
           </div>
